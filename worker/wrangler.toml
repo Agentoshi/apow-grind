@@ -1,0 +1,14 @@
+name = "grind-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Custom domain — requires DNS CNAME in Cloudflare dashboard
+routes = [
+  { pattern = "grind.apow.io/*", zone_name = "apow.io" }
+]
+
+# Secrets — set via `wrangler secret put`:
+#   wrangler secret put RUNPOD_ENDPOINT
+#   wrangler secret put RUNPOD_API_KEY
+#   wrangler secret put SERVICE_WALLET
