@@ -39,11 +39,12 @@ interface Env {
 }
 
 // Free Base RPCs — fallback chain if RPC_URL not set
+// NOTE: base.llamarpc.com returns Cloudflare challenges from Workers — keep it last
 const BASE_RPC_URLS = [
-  "https://base.llamarpc.com",
-  "https://base-mainnet.public.blastapi.io",
-  "https://1rpc.io/base",
   "https://mainnet.base.org",
+  "https://1rpc.io/base",
+  "https://base-mainnet.public.blastapi.io",
+  "https://base.llamarpc.com",
 ];
 
 const app = new Hono<{ Bindings: Env }>();
@@ -61,26 +62,31 @@ let totalGrinds = 0;
 let totalGrindTimeMs = 0;
 let totalQueueTimeMs = 0;
 
-// ── Dynamic pricing ─────────────────────────────────────────────────
-// Tracks actual RunPod cost + settlement gas with a small markup.
-// Never at a loss: floor covers gas even for instant grinds.
+// ── Stable pricing ──────────────────────────────────────────────────
+// x402 payment is a 2-step flow (402 -> signed retry). In Cloudflare Workers,
+// those two requests can land on different isolates. Per-isolate in-memory
+// pricing therefore causes intermittent "No matching payment requirements"
+// failures when the retry hits an isolate with different local metrics.
+//
+// Keep price deterministic across isolates until pricing is backed by shared
+// state. Health metrics remain useful for observability, but not for auth.
 
 const RUNPOD_PER_SEC = 0.34 / 3600; // $0.0000944/sec (RunPod serverless billing)
 const GAS_COST_EST = 0.001;          // ~$0.001 Base L2 settlement gas
 const MARKUP = 1.5;                   // 50% buffer for time variance
 const PRICE_FLOOR = 0.002;           // minimum price (covers gas)
 const DEFAULT_GRIND_SECS = 15;       // daemon mode avg (~12-17s)
-
-function computePrice(): string {
-  const avgSecs = totalGrinds > 0
-    ? totalGrindTimeMs / totalGrinds / 1000
-    : DEFAULT_GRIND_SECS;
-  const gpuCost = avgSecs * RUNPOD_PER_SEC;
+const BACKEND_VERSION = "daemon-v2";
+const DETERMINISTIC_PRICE = (() => {
+  const gpuCost = DEFAULT_GRIND_SECS * RUNPOD_PER_SEC;
   const raw = (gpuCost + GAS_COST_EST) * MARKUP;
   const price = Math.max(PRICE_FLOOR, raw);
-  // Round up to nearest $0.001 — never rounds down
   const rounded = Math.ceil(price * 1000) / 1000;
   return `$${rounded.toFixed(3)}`;
+})();
+
+function computePrice(): string {
+  return DETERMINISTIC_PRICE;
 }
 
 // ── Health check — no payment required ───────────────────────────────
@@ -92,6 +98,8 @@ app.get("/health", (c) => {
   return c.json({
     ok: true,
     service: "grind-proxy",
+    version: BACKEND_VERSION,
+    timeout_ms: RUNPOD_TIMEOUT_MS,
     total_grinds: totalGrinds,
     avg_grind_time: Math.round(avgGrindTime * 1000) / 1000,
     avg_queue_time: Math.round(avgQueueTime * 1000) / 1000,
@@ -204,7 +212,7 @@ app.use("/grind", async (c, next) => {
 
 // ── Grind handler ────────────────────────────────────────────────────
 
-const RUNPOD_TIMEOUT_MS = 60_000;
+const RUNPOD_TIMEOUT_MS = 120_000;
 
 app.post("/grind", async (c) => {
   const requestId = crypto.randomUUID();
@@ -269,7 +277,7 @@ app.post("/grind", async (c) => {
   } catch (err) {
     clearTimeout(timeout);
     if (err instanceof DOMException && err.name === "AbortError") {
-      return c.json({ error: "Grind timed out (60s)" }, 504);
+      return c.json({ error: "Grind timed out (120s)" }, 504);
     }
     return c.json({ error: "RunPod backend unreachable" }, 502);
   }

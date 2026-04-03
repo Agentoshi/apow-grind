@@ -19,11 +19,21 @@ Output: { nonce: "12345", elapsed: 1.234 }
 import subprocess
 import threading
 import time
+import sys
+import os
+import select
 import runpod
+
+
+def log(msg):
+    """Print to stderr so RunPod captures it in worker logs."""
+    print(f"[handler] {msg}", file=sys.stderr, flush=True)
 
 
 class CudaDaemon:
     """Persistent grinder-cuda --daemon subprocess wrapper."""
+
+    STARTUP_TIMEOUT = 60  # seconds to wait for READY on cold start
 
     def __init__(self):
         self.proc = None
@@ -32,18 +42,53 @@ class CudaDaemon:
 
     def _start(self):
         """Launch daemon and wait for READY (CUDA context init + warmup kernel)."""
+        binary = "./grinder-cuda"
+        if not os.path.exists(binary):
+            raise RuntimeError(f"Binary not found: {binary} (cwd={os.getcwd()})")
+
+        log(f"Starting {binary} --daemon ...")
         self.proc = subprocess.Popen(
-            ["./grinder-cuda", "--daemon"],
+            [binary, "--daemon"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,  # Line-buffered
         )
-        # Wait for READY — daemon fires a warmup kernel at startup
-        line = self.proc.stdout.readline().strip()
+
+        # Wait for READY with timeout — don't hang forever
+        deadline = time.monotonic() + self.STARTUP_TIMEOUT
+        line = ""
+        while time.monotonic() < deadline:
+            # Check if process died
+            if self.proc.poll() is not None:
+                stderr = self.proc.stderr.read()
+                raise RuntimeError(
+                    f"Daemon exited with code {self.proc.returncode}: {stderr[:500]}"
+                )
+            # Non-blocking read with select
+            ready, _, _ = select.select([self.proc.stdout], [], [], 1.0)
+            if ready:
+                line = self.proc.stdout.readline().strip()
+                if line:
+                    break
+
         if line != "READY":
-            raise RuntimeError(f"Daemon failed to start: got '{line}'")
+            # Kill hung process
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+            stderr = ""
+            try:
+                stderr = self.proc.stderr.read()[:500]
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Daemon startup timeout ({self.STARTUP_TIMEOUT}s). "
+                f"Got: '{line}'. Stderr: {stderr}"
+            )
 
     def _is_alive(self):
         """Check if daemon process is still running."""
@@ -134,10 +179,24 @@ class CudaDaemon:
 # Module-level daemon — initialized ONCE at container boot.
 # RunPod keeps Python globals alive between handler calls when
 # refresh_worker is OFF.
-daemon = CudaDaemon()
+log(f"Handler starting (cwd={os.getcwd()}, files={os.listdir('.')})")
+try:
+    daemon = CudaDaemon()
+    log("Daemon ready — accepting jobs")
+except Exception as e:
+    log(f"FATAL: Daemon init failed: {e}")
+    daemon = None
 
 
 def handler(event):
+    global daemon
+    if daemon is None:
+        # Try once more in case it was a transient failure
+        try:
+            daemon = CudaDaemon()
+        except Exception as e:
+            return {"error": f"CUDA daemon not available: {e}"}
+
     inp = event["input"]
     challenge = inp.get("challenge", "")
     target = inp.get("target", "")

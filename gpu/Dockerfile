@@ -1,17 +1,17 @@
 # APoW GPU Nonce Grinder — RunPod Serverless
 #
-# Builds grinder-cuda from source inside a CUDA 12.6 devel image.
-# Using devel (not runtime) because we compile the CUDA kernel in-container
-# to guarantee matching toolkit version.
+# Builds grinder-cuda from source inside a CUDA devel image.
+# Using CUDA 12.2 for broad driver compatibility (requires driver >= 525.60).
+# CUDA 12.6 required driver >= 560.28 which many RunPod GPUs don't have.
 #
 # Build:  docker build --platform linux/amd64 -t grind-proxy-gpu .
-# Deploy: Push to Docker Hub / GHCR, then create RunPod serverless endpoint.
+# Deploy: Push to GHCR, then create RunPod serverless endpoint.
 
-FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip && \
-    pip3 install --break-system-packages runpod && \
+    pip3 install runpod && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
