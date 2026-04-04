@@ -51,6 +51,7 @@ Operational rule:
 Useful endpoints:
 - `GET /health` — current pricing inputs, reference quote, and in-memory revenue counters
 - `GET /price?target=0x...` — request-specific quote for a given mining target
+- `GET /ops/economics` — live RunPod config/health plus pricing warnings for burn-risk auditing
 
 ## Self-Hosting
 
@@ -163,6 +164,36 @@ The CLI automatically handles x402 payments — when the server returns 402, the
 ```
 
 No payment required.
+
+### GET /ops/economics
+
+Returns the current pricing model plus live RunPod endpoint config/health and warnings for common burn risks:
+- `workersMin > 0`
+- `idleTimeout` set too high
+- `workersStandby > 0` still configured on the endpoint
+- workers still running with no queue backlog
+
+This is the endpoint to watch when you want to verify the service is not quietly drifting back into a cost-bleeding configuration.
+
+## Operations
+
+For a quick operator report from a terminal:
+
+```bash
+cd worker
+npm run economics
+```
+
+Optional env vars:
+- `GRIND_BASE_URL` — defaults to `https://grind.apow.io`
+- `RPC_URL` — defaults to `https://mainnet.base.org`
+- `SERVICE_WALLET` — include current ETH/USDC balances for the fee wallet
+
+Recommended guardrails:
+- keep `workersMin = 0`
+- keep `idleTimeout <= 5`
+- treat any `workersStandby > 0` warning as something to audit in the RunPod console/billing UI
+- re-check `RUNPOD_GPU_COST_PER_HOUR_USD` whenever you change GPU classes or endpoint pricing
 
 ## License
 

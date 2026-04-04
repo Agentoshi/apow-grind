@@ -107,6 +107,38 @@ type GrindRequestBody = {
   address?: string;
 };
 
+type RunpodEndpointConfig = {
+  id: string;
+  name: string;
+  workersMin: number;
+  workersMax: number;
+  workersStandby?: number;
+  idleTimeout?: number;
+  scalerType?: string;
+  scalerValue?: number;
+  gpuTypeIds?: string[];
+  flashboot?: boolean;
+  executionTimeoutMs?: number;
+};
+
+type RunpodEndpointHealth = {
+  jobs?: {
+    completed?: number;
+    failed?: number;
+    inProgress?: number;
+    inQueue?: number;
+    retried?: number;
+  };
+  workers?: {
+    idle?: number;
+    initializing?: number;
+    ready?: number;
+    running?: number;
+    throttled?: number;
+    unhealthy?: number;
+  };
+};
+
 function parseEnvNumber(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
   const parsed = Number(raw);
@@ -217,6 +249,76 @@ function validateAndNormalizeRequest(body: GrindRequestBody): { challenge: `0x${
   };
 }
 
+function extractRunpodEndpointId(endpointUrl: string): string | null {
+  const match = endpointUrl.match(/\/v2\/([^/]+)/);
+  return match?.[1] ?? null;
+}
+
+async function fetchJsonWithTimeout<T>(url: string, init: RequestInit, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`);
+    }
+    return await response.json<T>();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchRunpodTelemetry(env: Env): Promise<{
+  endpointId: string;
+  config: RunpodEndpointConfig;
+  health: RunpodEndpointHealth;
+}> {
+  const endpointId = extractRunpodEndpointId(env.RUNPOD_ENDPOINT);
+  if (!endpointId) {
+    throw new Error("Could not parse RunPod endpoint ID from RUNPOD_ENDPOINT");
+  }
+  const authHeader = { Authorization: `Bearer ${env.RUNPOD_API_KEY}` };
+  const [config, health] = await Promise.all([
+    fetchJsonWithTimeout<RunpodEndpointConfig>(
+      `https://rest.runpod.io/v1/endpoints/${endpointId}`,
+      { headers: authHeader },
+      4_000,
+    ),
+    fetchJsonWithTimeout<RunpodEndpointHealth>(
+      `${env.RUNPOD_ENDPOINT}/health`,
+      { headers: authHeader },
+      4_000,
+    ),
+  ]);
+  return { endpointId, config, health };
+}
+
+function buildEconomicsWarnings(runpod: { config: RunpodEndpointConfig; health: RunpodEndpointHealth }, pricing: PricingConfig): string[] {
+  const warnings: string[] = [];
+  const jobs = runpod.health.jobs ?? {};
+  const workers = runpod.health.workers ?? {};
+  if ((runpod.config.workersMin ?? 0) > 0) {
+    warnings.push(`workersMin=${runpod.config.workersMin} keeps billed active workers alive when the service is idle`);
+  }
+  if ((runpod.config.idleTimeout ?? 0) > 15) {
+    warnings.push(`idleTimeout=${runpod.config.idleTimeout}s is high; idle workers can keep burning credits after each grind`);
+  }
+  if ((runpod.config.workersStandby ?? 0) > 0) {
+    warnings.push(`workersStandby=${runpod.config.workersStandby} is still configured; verify in RunPod billing whether standby workers are accruing charges`);
+  }
+  if ((workers.running ?? 0) > 0 && (jobs.inQueue ?? 0) === 0 && (jobs.inProgress ?? 0) === 0) {
+    warnings.push(`workers are still running with no queue backlog; confirm the endpoint drains after idleTimeout=${runpod.config.idleTimeout ?? "?"}s`);
+  }
+  if (pricing.gpuCostPerHourUsd < 0.39) {
+    warnings.push(`RUNPOD_GPU_COST_PER_HOUR_USD=${pricing.gpuCostPerHourUsd} looks too low for the current fleet; underpricing risk is high`);
+  }
+  if (pricing.priceFloorUsd < 0.004) {
+    warnings.push(`PRICE_FLOOR_USD=${pricing.priceFloorUsd} is below the current safe floor and can undercharge low-difficulty requests`);
+  }
+  return warnings;
+}
+
 // ── Health check — no payment required ───────────────────────────────
 
 app.get("/health", (c) => {
@@ -254,6 +356,66 @@ app.get("/health", (c) => {
       reference_price_usd: Number(referenceQuote.priceUsd.toFixed(3)),
     },
   });
+});
+
+app.get("/ops/economics", async (c) => {
+  const pricing = getPricingConfig(c.env);
+  const referenceQuote = quoteReferencePrice(pricing);
+  try {
+    const runpod = await fetchRunpodTelemetry(c.env);
+    const warnings = buildEconomicsWarnings(runpod, pricing);
+    return c.json({
+      ok: true,
+      service: "grind-proxy",
+      version: BACKEND_VERSION,
+      endpoint_id: runpod.endpointId,
+      pricing: {
+        mode: "deterministic-per-request",
+        runpod_gpu_cost_per_hour_usd: pricing.gpuCostPerHourUsd,
+        runpod_hashrate_hps: pricing.hashrateHps,
+        runpod_startup_overhead_secs: pricing.startupOverheadSecs,
+        runpod_min_billable_secs: pricing.minBillableSecs,
+        runpod_time_buffer_multiplier: pricing.timeBufferMultiplier,
+        settlement_gas_usd: pricing.settlementGasUsd,
+        markup: pricing.markup,
+        price_floor_usd: pricing.priceFloorUsd,
+        price_rounding_usd: pricing.priceRoundingUsd,
+        reference_compute_secs: pricing.referenceComputeSecs,
+        reference_price_usd: Number(referenceQuote.priceUsd.toFixed(3)),
+        reference_billable_secs: Number(referenceQuote.billableSecs.toFixed(3)),
+      },
+      runpod: {
+        config: {
+          workersMin: runpod.config.workersMin,
+          workersMax: runpod.config.workersMax,
+          workersStandby: runpod.config.workersStandby,
+          idleTimeout: runpod.config.idleTimeout,
+          scalerType: runpod.config.scalerType,
+          scalerValue: runpod.config.scalerValue,
+          gpuTypeIds: runpod.config.gpuTypeIds,
+          flashboot: runpod.config.flashboot,
+          executionTimeoutMs: runpod.config.executionTimeoutMs,
+        },
+        health: runpod.health,
+      },
+      local_metrics: {
+        total_grinds: totalGrinds,
+        paid_requests: totalPaidRequests,
+        failed_grinds: totalFailures,
+        quoted_revenue_usd: Number(totalQuotedRevenueUsd.toFixed(3)),
+      },
+      warnings,
+    });
+  } catch (err) {
+    return c.json({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      pricing: {
+        mode: "deterministic-per-request",
+        reference_price_usd: Number(referenceQuote.priceUsd.toFixed(3)),
+      },
+    }, 502);
+  }
 });
 
 app.get("/price", (c) => {
