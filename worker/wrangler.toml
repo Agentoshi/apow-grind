@@ -12,3 +12,18 @@ routes = [
 #   wrangler secret put RUNPOD_ENDPOINT
 #   wrangler secret put RUNPOD_API_KEY
 #   wrangler secret put SERVICE_WALLET
+#   wrangler secret put FACILITATOR_PRIVATE_KEY
+
+[vars]
+# Conservative default pricing assumptions. Override these if your actual
+# RunPod cost profile changes, but keep them deterministic across isolates.
+RUNPOD_GPU_COST_PER_HOUR_USD = "0.59"
+RUNPOD_HASHRATE_HPS = "20000000000"
+RUNPOD_STARTUP_OVERHEAD_SECS = "8"
+RUNPOD_MIN_BILLABLE_SECS = "1"
+RUNPOD_TIME_BUFFER_MULTIPLIER = "1.25"
+SETTLEMENT_GAS_USD = "0.001"
+PRICE_MARKUP = "1.5"
+PRICE_FLOOR_USD = "0.004"
+PRICE_ROUNDING_USD = "0.001"
+PRICE_REFERENCE_COMPUTE_SECS = "15"

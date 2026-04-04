@@ -1,6 +1,6 @@
 # GrindProxy — x402 GPU Grinding Service
 
-Open-source, at-cost GPU nonce grinding for APoW mining. Any agent sends `{challenge, target, address}` and gets back a valid nonce, paying with USDC via [x402](https://x402.org). No accounts, no SSH, no API keys.
+Open-source, x402 payment-gated GPU nonce grinding for APoW mining. Any agent sends `{challenge, target, address}` and gets back a valid nonce, paying with USDC via [x402](https://x402.org). No accounts, no SSH, no API keys.
 
 ## Architecture
 
@@ -19,14 +19,38 @@ CF Worker (grind.apow.io)           ← @x402/hono middleware
   │  5. Settle payment on-chain
   │
   ▼
-RunPod Serverless (RTX 4090)        ← Docker: grinder-cuda binary
+RunPod Serverless (GPU backend)     ← Docker: grinder-cuda binary
   │  POST /runsync  {input: {challenge, target, address}}
   │  Returns: {nonce, elapsed}
-  │  Scale-to-zero, per-second billing (~$0.34/hr)
+  │  Scale-to-zero is strongly recommended (`workersMin=0`)
 ```
 
-**Pricing:** Dynamic, tracks actual cost. `(avg_grind_time × $0.0000944/sec + $0.001 gas) × 1.5`
-**At current difficulty (~30s):** ~$0.006 | **Floor:** $0.002 | Check `/health` for live price
+## Pricing
+
+Pricing is deterministic per request so x402 remains stable across Cloudflare isolates, but it is still difficulty-aware. The Worker computes price from the submitted `target` plus conservative cost assumptions:
+
+`price = max(floor, ceil(((billable_gpu_time × gpu_cost_per_sec) + settlement_gas) × markup, rounding))`
+
+Where:
+- `billable_gpu_time = max(min_billable_secs, estimated_compute_secs × time_buffer_multiplier + startup_overhead_secs)`
+- `estimated_compute_secs` is derived from the submitted target and the configured effective hashrate
+- pricing inputs are configured via Worker vars, not in-memory metrics, so the initial 402 and paid retry always agree
+
+Default conservative assumptions:
+- GPU cost: `$0.59/hr`
+- Effective hashrate: `20 GH/s`
+- Startup overhead: `8s`
+- Time buffer: `1.25x`
+- Settlement gas: `$0.001`
+- Markup: `1.5x`
+- Floor: `$0.004`
+
+Operational rule:
+- Keep RunPod `workersMin=0` unless you intentionally want to subsidize idle warm workers
+
+Useful endpoints:
+- `GET /health` — current pricing inputs, reference quote, and in-memory revenue counters
+- `GET /price?target=0x...` — request-specific quote for a given mining target
 
 ## Self-Hosting
 
@@ -57,6 +81,20 @@ npm install
 wrangler secret put RUNPOD_ENDPOINT   # https://api.runpod.ai/v2/YOUR_ENDPOINT_ID
 wrangler secret put RUNPOD_API_KEY    # Your RunPod API key
 wrangler secret put SERVICE_WALLET    # 0x address to receive USDC payments
+wrangler secret put FACILITATOR_PRIVATE_KEY
+
+# Optional: override pricing assumptions if your fleet differs
+# wrangler.toml [vars]:
+#   RUNPOD_GPU_COST_PER_HOUR_USD = "0.59"
+#   RUNPOD_HASHRATE_HPS = "20000000000"
+#   RUNPOD_STARTUP_OVERHEAD_SECS = "8"
+#   RUNPOD_MIN_BILLABLE_SECS = "1"
+#   RUNPOD_TIME_BUFFER_MULTIPLIER = "1.25"
+#   SETTLEMENT_GAS_USD = "0.001"
+#   PRICE_MARKUP = "1.5"
+#   PRICE_FLOOR_USD = "0.004"
+#   PRICE_ROUNDING_USD = "0.001"
+#   PRICE_REFERENCE_COMPUTE_SECS = "15"
 
 # Deploy
 wrangler deploy
@@ -97,6 +135,8 @@ The CLI automatically handles x402 payments — when the server returns 402, the
 - `X-Grind-Request-Id` — unique request ID
 - `X-Grind-Queue-Time` — time spent in queue (ms)
 - `X-Grind-Compute-Time` — GPU compute time (ms)
+- `X-Grind-Price` — quoted x402 price charged for this request
+- `X-Grind-Billable-Secs` — billable seconds assumed by the pricing model
 
 **Response (402):** x402 payment requirements (handled automatically by `@x402/fetch`)
 
@@ -107,8 +147,18 @@ The CLI automatically handles x402 payments — when the server returns 402, the
   "ok": true,
   "service": "grind-proxy",
   "total_grinds": 42,
+  "paid_requests": 43,
+  "failed_grinds": 1,
   "avg_grind_time": 12.345,
-  "avg_queue_time": 0.05
+  "avg_queue_time": 0.05,
+  "quoted_revenue_usd": 0.217,
+  "price": "$0.006",
+  "pricing": {
+    "mode": "deterministic-per-request",
+    "runpod_gpu_cost_per_hour_usd": 0.59,
+    "runpod_hashrate_hps": 20000000000,
+    "reference_price_usd": 0.006
+  }
 }
 ```
 
