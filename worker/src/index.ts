@@ -23,7 +23,7 @@ import {
   registerExactEvmScheme,
 } from "@x402/evm/exact/facilitator";
 import { toFacilitatorEvmSigner } from "@x402/evm";
-import { createWalletClient, createPublicClient, http } from "viem";
+import { createWalletClient, createPublicClient, getAddress, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { publicActions } from "viem";
@@ -38,6 +38,7 @@ interface Env {
   RUNPOD_GPU_COUNT?: string;
   SERVICE_WALLET: string;
   FACILITATOR_PRIVATE_KEY: string;
+  REQUIRE_SPLIT_WALLETS?: string;
   ECONOMICS_DB?: D1Database;
   RPC_URL?: string;
   REQUIRE_ECONOMICS_DB?: string;
@@ -219,6 +220,16 @@ type RunpodSafetyAssessment = {
   safe: boolean;
   reasons: string[];
   maxObservedWorkerCostPerHourUsd: number | null;
+};
+
+type WalletSplitAssessment = {
+  safe: boolean;
+  warnings: string[];
+  blockingReasons: string[];
+  serviceWallet?: `0x${string}`;
+  facilitatorAddress?: `0x${string}`;
+  facilitatorEth?: string;
+  requireSplitWallets: boolean;
 };
 
 type RunpodSafetyOptions = {
@@ -852,6 +863,64 @@ function economicsLedgerRequired(env: Partial<Env>): boolean {
   return env.REQUIRE_ECONOMICS_DB !== "false";
 }
 
+function requireSplitWallets(env: Partial<Env>): boolean {
+  return env.REQUIRE_SPLIT_WALLETS === "true";
+}
+
+async function assessWalletSplit(
+  env: Pick<Env, "SERVICE_WALLET" | "FACILITATOR_PRIVATE_KEY" | "REQUIRE_SPLIT_WALLETS" | "RPC_URL">,
+): Promise<WalletSplitAssessment> {
+  const warnings: string[] = [];
+  const blockingReasons: string[] = [];
+  const requireSplit = requireSplitWallets(env);
+  let serviceWallet: `0x${string}` | undefined;
+  let facilitatorAddress: `0x${string}` | undefined;
+  let facilitatorEth: string | undefined;
+
+  try {
+    serviceWallet = getAddress(env.SERVICE_WALLET) as `0x${string}`;
+  } catch {
+    blockingReasons.push("SERVICE_WALLET is not a valid EVM address");
+  }
+
+  try {
+    facilitatorAddress = privateKeyToAccount(env.FACILITATOR_PRIVATE_KEY as `0x${string}`).address;
+  } catch {
+    blockingReasons.push("FACILITATOR_PRIVATE_KEY does not derive a valid facilitator address");
+  }
+
+  if (serviceWallet && facilitatorAddress && serviceWallet.toLowerCase() === facilitatorAddress.toLowerCase()) {
+    const reason = "dual-role wallet: settlement signer == revenue payTo";
+    warnings.push(reason);
+    if (requireSplit) blockingReasons.push(reason);
+  }
+
+  if (facilitatorAddress && env.RPC_URL) {
+    try {
+      const pub = createPublicClient({ chain: base, transport: http(getRpcUrl(env as Env)) });
+      const balance = await pub.getBalance({ address: facilitatorAddress });
+      facilitatorEth = (Number(balance) / 1e18).toFixed(6);
+      if (balance < 500_000_000_000_000n) {
+        warnings.push("facilitator gas below 0.0005 ETH");
+      }
+    } catch (err) {
+      warnings.push(`facilitator gas check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } else if (facilitatorAddress) {
+    warnings.push("facilitator gas check skipped: RPC_URL is not configured");
+  }
+
+  return {
+    safe: blockingReasons.length === 0,
+    warnings,
+    blockingReasons,
+    serviceWallet,
+    facilitatorAddress,
+    facilitatorEth,
+    requireSplitWallets: requireSplit,
+  };
+}
+
 function trimLedgerError(error: string | null | undefined): string | null {
   if (!error) return null;
   return error.slice(0, 500);
@@ -1119,12 +1188,13 @@ async function runRunpodLeakCleanup(env: Env, reason = "scheduled"): Promise<Run
 
 // ── Health check — no payment required ───────────────────────────────
 
-app.get("/health", (c) => {
+app.get("/health", async (c) => {
   const pricing = getPricingConfig(c.env);
   const runpodTimeoutMs = Math.round(pricing.failureTimeoutSecs * 1000);
   const referenceQuote = quoteReferencePrice(pricing);
   const avgGrindTime = totalGrinds > 0 ? totalGrindTimeMs / totalGrinds / 1000 : 0;
   const avgQueueTime = totalGrinds > 0 ? totalQueueTimeMs / totalGrinds / 1000 : 0;
+  const walletSplit = await assessWalletSplit(c.env);
   return c.json({
     ok: true,
     service: "grind-proxy",
@@ -1137,6 +1207,15 @@ app.get("/health", (c) => {
     avg_queue_time: Math.round(avgQueueTime * 1000) / 1000,
     quoted_revenue_usd: Number(totalQuotedRevenueUsd.toFixed(3)),
     price: referenceQuote.price,
+    wallet_split: {
+      safe: walletSplit.safe,
+      require_split_wallets: walletSplit.requireSplitWallets,
+      service_wallet: walletSplit.serviceWallet,
+      facilitator_address: walletSplit.facilitatorAddress,
+      facilitator_eth: walletSplit.facilitatorEth,
+      blocking_reasons: walletSplit.blockingReasons,
+      warnings: walletSplit.warnings,
+    },
     pricing: {
       mode: "deterministic-per-request",
       reference_compute_secs: pricing.referenceComputeSecs,
@@ -1180,8 +1259,13 @@ app.get("/ops/economics", async (c) => {
     const runpod = await fetchRunpodTelemetryCached(c.env, true);
     const allowPausedAutostart = canAutostartRunpod(c.env, runpod.config);
     const safety = assessRunpodSafety(runpod, pricing, { allowPausedAutostart });
-    const warnings = buildEconomicsWarnings(runpod, pricing, safety, referenceQuote);
+    const walletSplit = await assessWalletSplit(c.env);
+    const warnings = [
+      ...buildEconomicsWarnings(runpod, pricing, safety, referenceQuote),
+      ...walletSplit.warnings,
+    ];
     const ledger = await getEconomicsLedgerStatus(c.env);
+    const blockingReasons = [...safety.reasons, ...walletSplit.blockingReasons];
     return c.json({
       ok: true,
       service: "grind-proxy",
@@ -1216,10 +1300,17 @@ app.get("/ops/economics", async (c) => {
         reference_cost_before_margin_usd: Number(referenceQuote.costBeforeMarginUsd.toFixed(6)),
         reference_gross_margin_usd: Number(referenceQuote.grossMarginUsd.toFixed(6)),
       },
-      safe_to_serve: safety.safe,
+      safe_to_serve: safety.safe && walletSplit.safe,
       runpod_autopause_enabled: runpodAutopauseEnabled(c.env),
       paused_autostart_ready: allowPausedAutostart && (runpod.config.workersMax ?? 0) < 1,
-      blocking_reasons: safety.reasons,
+      blocking_reasons: blockingReasons,
+      wallet_split: {
+        safe: walletSplit.safe,
+        require_split_wallets: walletSplit.requireSplitWallets,
+        service_wallet: walletSplit.serviceWallet,
+        facilitator_address: walletSplit.facilitatorAddress,
+        facilitator_eth: walletSplit.facilitatorEth,
+      },
       runpod: {
         config: {
           workersMin: runpod.config.workersMin,
@@ -1851,6 +1942,7 @@ app.post("/grind", async (c) => {
 
 export {
   RUNPOD_4090_PRO_FLEX_COST_PER_HOUR_USD,
+  assessWalletSplit,
   assessRunpodSafety,
   buildInitialGrindLedgerRow,
   buildEconomicsWarnings,
@@ -1870,6 +1962,7 @@ export type {
   RunpodEndpointHealth,
   RunpodSafetyAssessment,
   RunpodTelemetry,
+  WalletSplitAssessment,
 };
 
 const worker: ExportedHandler<Env> = {

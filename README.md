@@ -139,10 +139,16 @@ wrangler secret put RPC_URL           # Private Base RPC for settlement + audits
 #   MIN_GROSS_MARGIN_USD = "0.002"
 #   MIN_GROSS_MARGIN_PCT = "0.20"
 #   REQUIRE_ECONOMICS_DB = "true"
+#   REQUIRE_SPLIT_WALLETS = "true"
 
 # Deploy
 wrangler deploy
 ```
+
+`SERVICE_WALLET` should be a cold treasury/payment destination. `FACILITATOR_PRIVATE_KEY`
+should be a separate hot settlement signer with only gas dust. Set
+`REQUIRE_SPLIT_WALLETS=true` only after rotation is complete; when enabled, `/grind`
+stays blocked if the facilitator address equals `SERVICE_WALLET`.
 
 ### 3. Client Configuration (apow-cli)
 
@@ -220,6 +226,7 @@ Returns the current pricing model plus live RunPod config/health and explicit se
 - D1 economics ledger missing or unhealthy
 - configured worker cost is below the official flex rate for the allowed GPU class
 - observed worker cost exceeds the priced worker cost assumption
+- split-wallet requirement enabled while settlement signer equals revenue payTo
 
 If `safe_to_serve` is `false`, the Worker blocks `/grind` until the billing configuration is safe again.
 

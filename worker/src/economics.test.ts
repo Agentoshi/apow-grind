@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   RUNPOD_4090_PRO_FLEX_COST_PER_HOUR_USD,
   assessRunpodSafety,
+  assessWalletSplit,
   buildInitialGrindLedgerRow,
   economicsLedgerRequired,
   getPricingConfig,
@@ -173,6 +174,25 @@ test("economics ledger is required by default and can be explicitly disabled", (
   assert.equal(economicsLedgerRequired({}), true);
   assert.equal(economicsLedgerRequired({ REQUIRE_ECONOMICS_DB: "true" }), true);
   assert.equal(economicsLedgerRequired({ REQUIRE_ECONOMICS_DB: "false" }), false);
+});
+
+test("wallet split warns but does not block until required", async () => {
+  const split = await assessWalletSplit({
+    SERVICE_WALLET: "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+    FACILITATOR_PRIVATE_KEY: "0x1111111111111111111111111111111111111111111111111111111111111111",
+  });
+  assert.equal(split.safe, true);
+  assert.ok(split.warnings.some((warning) => warning.includes("dual-role wallet")));
+});
+
+test("wallet split blocks dual-role wallet when REQUIRE_SPLIT_WALLETS is true", async () => {
+  const split = await assessWalletSplit({
+    SERVICE_WALLET: "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+    FACILITATOR_PRIVATE_KEY: "0x1111111111111111111111111111111111111111111111111111111111111111",
+    REQUIRE_SPLIT_WALLETS: "true",
+  });
+  assert.equal(split.safe, false);
+  assert.ok(split.blockingReasons.some((reason) => reason.includes("dual-role wallet")));
 });
 
 test("ledger row captures economics without storing raw payment material", () => {
