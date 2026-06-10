@@ -8,22 +8,49 @@ routes = [
   { pattern = "grind.apow.io/*", zone_name = "apow.io" }
 ]
 
+[triggers]
+crons = ["* * * * *"]
+
 # Secrets — set via `wrangler secret put`:
 #   wrangler secret put RUNPOD_ENDPOINT
 #   wrangler secret put RUNPOD_API_KEY
 #   wrangler secret put SERVICE_WALLET
 #   wrangler secret put FACILITATOR_PRIVATE_KEY
+#   wrangler secret put RPC_URL
+# If your RunPod endpoint uses a non-4090 GPU type, set RUNPOD_GPU_IDS and
+# RUNPOD_TEMPLATE_ID explicitly so the Worker can pause/resume paid capacity.
+
+[[d1_databases]]
+binding = "ECONOMICS_DB"
+database_name = "apow-grind-economics"
+database_id = "6ada8042-32c8-4b46-ac9f-6786aad258e5"
+migrations_dir = "migrations"
 
 [vars]
-# Conservative default pricing assumptions. Override these if your actual
-# RunPod cost profile changes, but keep them deterministic across isolates.
-RUNPOD_GPU_COST_PER_HOUR_USD = "0.59"
+# Conservative default pricing assumptions. These should reflect the worst
+# case flex-worker cost you are willing to rent, not an average case.
+REQUIRE_ECONOMICS_DB = "true"
+RUNPOD_AUTOPAUSE_ENABLED = "true"
+RUNPOD_GPU_IDS = "ADA_24"
+RUNPOD_TEMPLATE_ID = "jk913bmprs"
+RUNPOD_GPU_COUNT = "1"
+RUNPOD_WORKER_COST_PER_HOUR_USD = "1.25"
 RUNPOD_HASHRATE_HPS = "20000000000"
-RUNPOD_STARTUP_OVERHEAD_SECS = "8"
+RUNPOD_STARTUP_OVERHEAD_SECS = "120"
+RUNPOD_POST_JOB_IDLE_SECS = "5"
 RUNPOD_MIN_BILLABLE_SECS = "1"
 RUNPOD_TIME_BUFFER_MULTIPLIER = "1.25"
+RUNPOD_CONTAINER_DISK_GB = "20"
+RUNPOD_STORAGE_COST_PER_GB_MONTH_USD = "0.10"
+RUNPOD_FAILURE_ALLOWANCE_RATE = "1.0"
+RUNPOD_FAILURE_TIMEOUT_SECS = "300"
+RUNPOD_MAX_WORKERS_SAFE = "1"
 SETTLEMENT_GAS_USD = "0.001"
+CLOUDFLARE_OVERHEAD_USD = "0.0001"
+OBSERVABILITY_OVERHEAD_USD = "0.0001"
 PRICE_MARKUP = "1.5"
-PRICE_FLOOR_USD = "0.004"
+PRICE_FLOOR_USD = "0.301"
 PRICE_ROUNDING_USD = "0.001"
 PRICE_REFERENCE_COMPUTE_SECS = "15"
+MIN_GROSS_MARGIN_USD = "0.002"
+MIN_GROSS_MARGIN_PCT = "0.20"

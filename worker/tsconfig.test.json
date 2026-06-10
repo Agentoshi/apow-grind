@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "types": ["@cloudflare/workers-types", "node"],
+    "noEmit": false,
+    "outDir": ".tmp-test"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": []
+}
